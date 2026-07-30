@@ -139,7 +139,15 @@ jobs:
         # artefact, rather than only signing the SBOM file in isolation.
         run: |
           set -e
-          npm pack --silent --prefix targets/express-real --pack-destination results
+          # Note: `--prefix <dir>` does NOT tell `npm pack` which package to
+          # pack (that flag only affects npm's install-time working
+          # directory) - it still looks for package.json in the current
+          # directory and fails with ENOENT. The correct way to pack a
+          # specific folder is to pass it as an explicit relative path
+          # (the leading "./" matters too - without it, npm treats a bare
+          # "targets/express-real" as a "user/repo" GitHub shorthand spec
+          # and tries to git-clone it instead of reading the local folder).
+          npm pack --silent --pack-destination results ./targets/express-real
           artefact=$(ls results/*.tgz | head -n1)
           echo "Built artefact: $artefact"
           # Note: attest-blob does not take --output-signature/--output-certificate
