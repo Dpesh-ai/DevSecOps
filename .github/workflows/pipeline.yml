@@ -142,11 +142,13 @@ jobs:
           npm pack --silent --prefix targets/express-real --pack-destination results
           artefact=$(ls results/*.tgz | head -n1)
           echo "Built artefact: $artefact"
+          # Note: attest-blob does not take --output-signature/--output-certificate
+          # (those are sign-blob flags) - it writes a single DSSE attestation file
+          # via --output-attestation instead.
           cosign attest-blob --yes \
             --type=cyclonedx \
             --predicate results/sbom-express-real.json \
-            --output-signature "$artefact.sig" \
-            --output-certificate "$artefact.pem" \
+            --output-attestation "$artefact.attestation.json" \
             "$artefact"
 
       - name: "Verify signatures (expected: PASS)"
@@ -200,5 +202,4 @@ jobs:
             results/sbom-*.json.sig
             results/sbom-*.json.pem
             results/*.tgz
-            results/*.tgz.sig
-            results/*.tgz.pem
+            results/*.tgz.attestation.json
