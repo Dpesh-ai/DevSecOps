@@ -1,0 +1,22 @@
+{
+  "snapshot_note": "Offline fallback snapshot of a small subset of CISA's Known Exploited Vulnerabilities (KEV) catalogue, used only when the live feed at https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json cannot be reached (e.g. a network-restricted evaluation environment). In the GitHub Actions CI pipeline the live feed is fetched directly and this file is not needed. This snapshot is NOT exhaustive and must not be treated as authoritative - it exists purely so the pipeline's KEV cross-referencing logic remains testable offline.",
+  "snapshot_captured": "2026-01-15",
+  "source": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+  "cve_ids": [
+    "CVE-2021-44228",
+    "CVE-2021-45046",
+    "CVE-2017-5638",
+    "CVE-2021-26855",
+    "CVE-2021-34473",
+    "CVE-2020-1472",
+    "CVE-2019-11510",
+    "CVE-2023-4863",
+    "CVE-2022-22965",
+    "CVE-2014-0160",
+    "CVE-2021-44077",
+    "CVE-2023-34362",
+    "CVE-2024-3400",
+    "CVE-2021-21985",
+    "CVE-2022-1388"
+  ]
+}

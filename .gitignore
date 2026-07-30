@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+_partial_results.json
+_build_validation_cache.json
+*.tampered
+.DS_Store

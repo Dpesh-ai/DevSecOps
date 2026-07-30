@@ -1,0 +1,204 @@
+name: SBOM-first DevSecOps Pipeline
+
+# Triggers: every push/PR (for continuous evaluation during development) and
+# a manual trigger so the pipeline can be re-run on demand for the
+# dissertation's experimental results.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write      # required for Sigstore Cosign KEYLESS signing (OIDC)
+  attestations: write   # required to publish build provenance attestations
+
+jobs:
+  # ------------------------------------------------------------------
+  # Stage 1-4: SBOM generation, vulnerability mapping, KEV/EPSS
+  # enrichment and dependency risk scoring - all driven by src/evaluate.py
+  # so that the exact same code path runs in CI and locally (reproducibility
+  # requirement, ToR Section 5.7 / 6.1).
+  # ------------------------------------------------------------------
+  generate-and-evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install native build toolchain for build-validation stage
+        # libpq-dev is required for targets/defectdojo-real's psycopg[c]
+        # dependency to build successfully (src/build_validate.py). Without
+        # this step, that target's build-validation result is False with a
+        # "pg_config not found" error - see results/REPORT.md for the
+        # documented finding this was added in response to.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpq-dev build-essential
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve Node.js lockfiles (controlled sample + real-world targets)
+        run: |
+          npm install --package-lock-only --prefix targets/node-sample
+          npm install --package-lock-only --prefix targets/juiceshop-real
+          npm install --package-lock-only --prefix targets/juiceshop-v9-real
+          npm install --package-lock-only --prefix targets/express-real
+
+      - name: Run full pipeline (SBOM -> vuln mapping -> risk scoring -> signing/tamper test -> method comparison)
+        env:
+          # NVD's live API is reachable from GitHub-hosted runners (unlike the
+          # network-restricted sandbox this was developed in - see
+          # docs/TRACEABILITY.md), so NVD enrichment is enabled here to
+          # supplement CVSS scores for the Python targets specifically.
+          ENABLE_NVD_ENRICHMENT: "1"
+        run: python src/evaluate.py
+
+      - name: Publish evaluation summary to job summary
+        run: |
+          cat results/REPORT.md >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat results/COMPARISON.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sboms
+          path: results/sbom-*.json
+
+      - name: Upload evaluation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-report
+          path: |
+            results/report.json
+            results/REPORT.md
+            results/COMPARISON.md
+            results/RESEARCH_EVALUATION.md
+            results/rank_shift_*.png
+
+      - name: Run unit tests
+        run: python -m pytest tests/ -v
+
+  # ------------------------------------------------------------------
+  # Stage 6: real cryptographic signing and provenance verification using
+  # Sigstore Cosign in KEYLESS mode. This is the "production" mechanism the
+  # project evaluates; src/sign_provenance.py's DSSE implementation
+  # (exercised above) mirrors this for offline/local reproducibility, but
+  # here we sign the *actual* SBOM artifacts with real short-lived Fulcio
+  # certificates and record the signature in the public Rekor log, then
+  # deliberately tamper with a copy and confirm verification fails.
+  # ------------------------------------------------------------------
+  sign-and-verify-provenance:
+    needs: generate-and-evaluate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download SBOMs
+        uses: actions/download-artifact@v4
+        with:
+          name: sboms
+          path: results
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign each SBOM (keyless, OIDC-backed)
+        run: |
+          set -e
+          for f in results/sbom-*.json; do
+            echo "Signing $f"
+            cosign sign-blob --yes \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.pem" \
+              "$f"
+          done
+
+      - name: Set up Node.js (for producing a real packaged build artefact)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Produce a real build artefact and attest its SBOM (cosign native CycloneDX attestation)
+        # This closes the gap between "we signed a manifest-derived SBOM
+        # file" and "we signed a *build artefact*" (ToR Section 6.1 Q4/
+        # Deliverable 4) by producing a genuine packaged npm artefact via
+        # `npm pack` (the standard Node.js packaging command) and then using
+        # Cosign's *native* CycloneDX SBOM-attestation subcommand -
+        # `attest-blob --type=cyclonedx` - to bind the SBOM to that specific
+        # artefact, rather than only signing the SBOM file in isolation.
+        run: |
+          set -e
+          npm pack --silent --prefix targets/express-real --pack-destination results
+          artefact=$(ls results/*.tgz | head -n1)
+          echo "Built artefact: $artefact"
+          cosign attest-blob --yes \
+            --type=cyclonedx \
+            --predicate results/sbom-express-real.json \
+            --output-signature "$artefact.sig" \
+            --output-certificate "$artefact.pem" \
+            "$artefact"
+
+      - name: "Verify signatures (expected: PASS)"
+        run: |
+          set -e
+          for f in results/sbom-*.json; do
+            cosign verify-blob \
+              --signature "$f.sig" \
+              --certificate "$f.pem" \
+              --certificate-identity-regexp ".*" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$f"
+          done
+
+      - name: "Controlled tamper-detection experiment (expected: FAIL to verify)"
+        run: |
+          set -e
+          f=$(ls results/sbom-*.json | head -n1)
+          cp "$f" "$f.tampered"
+          # flip one byte
+          python3 -c "
+          import sys
+          p = '$f.tampered'
+          data = bytearray(open(p, 'rb').read())
+          data[0] ^= 0xFF
+          open(p, 'wb').write(data)
+          "
+          echo "Attempting to verify a tampered artifact against the original signature - this MUST fail:"
+          if cosign verify-blob \
+              --signature "$f.sig" \
+              --certificate "$f.pem" \
+              --certificate-identity-regexp ".*" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$f.tampered"; then
+            echo "::error::Tampered artifact verified successfully - tamper detection FAILED"
+            exit 1
+          else
+            echo "Tamper correctly detected: verification failed as expected."
+          fi
+
+      - name: Attest build provenance (SLSA-style, GitHub native)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "results/sbom-*.json"
+
+      - name: Upload signatures, certificates, and the attested build artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signatures
+          path: |
+            results/sbom-*.json.sig
+            results/sbom-*.json.pem
+            results/*.tgz
+            results/*.tgz.sig
+            results/*.tgz.pem

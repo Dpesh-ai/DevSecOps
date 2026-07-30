@@ -1,0 +1,12 @@
+{
+  "name": "node-sample-target",
+  "version": "1.0.0",
+  "description": "Sample Node.js application used as a DevSecOps pipeline test target. Dependencies are intentionally pinned to older versions with known CVEs for evaluation purposes.",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "express": "4.16.0",
+    "lodash": "4.17.4",
+    "minimist": "0.0.8"
+  }
+}
